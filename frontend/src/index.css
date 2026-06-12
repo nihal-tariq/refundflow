@@ -1,0 +1,70 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+ * Design tokens (shadcn/ui convention). The app defaults to a dark, slate-based
+ * palette reminiscent of Linear / Vercel observability surfaces. A `.light`
+ * class on <html> flips to the light theme.
+ */
+@layer base {
+  :root,
+  .dark {
+    --background: 222 24% 7%;
+    --foreground: 210 20% 96%;
+    --card: 222 22% 10%;
+    --card-foreground: 210 20% 96%;
+    --muted: 220 16% 16%;
+    --muted-foreground: 218 12% 62%;
+    --primary: 246 80% 66%;
+    --primary-foreground: 0 0% 100%;
+    --border: 220 16% 18%;
+    --input: 220 16% 18%;
+    --ring: 246 80% 66%;
+    --success: 152 62% 45%;
+    --danger: 0 72% 58%;
+    --warning: 38 92% 56%;
+    --radius: 0.75rem;
+  }
+
+  .light {
+    --background: 210 40% 98%;
+    --foreground: 222 30% 12%;
+    --card: 0 0% 100%;
+    --card-foreground: 222 30% 12%;
+    --muted: 215 25% 94%;
+    --muted-foreground: 220 12% 42%;
+    --primary: 246 80% 60%;
+    --primary-foreground: 0 0% 100%;
+    --border: 216 20% 88%;
+    --input: 216 20% 88%;
+    --ring: 246 80% 60%;
+    --success: 152 56% 40%;
+    --danger: 0 70% 50%;
+    --warning: 35 92% 48%;
+  }
+
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground font-sans antialiased;
+  }
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  ::-webkit-scrollbar-thumb {
+    @apply rounded-full bg-muted;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+}
+
+@layer utilities {
+  .glass {
+    background: hsl(var(--card) / 0.7);
+    backdrop-filter: blur(12px);
+  }
+}
