@@ -9,6 +9,7 @@
  *   error       → pulsing icon + error tooltip
  */
 
+import { useEffect, useRef } from "react";
 import { Loader2, Mic, MicOff, Phone, PhoneOff } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useVoiceSession } from "@/hooks/useVoiceSession";
@@ -24,6 +25,7 @@ export function VoiceButton({ customerId, disabled }: VoiceButtonProps) {
     isMuted,
     agentSpeaking,
     errorMessage,
+    transcript,
     connect,
     disconnect,
     toggleMute,
@@ -34,8 +36,58 @@ export function VoiceButton({ customerId, disabled }: VoiceButtonProps) {
   const isActive = voiceState === "active";
   const isError = voiceState === "error";
 
+  // Keep the transcript pinned to the latest line as it streams in.
+  const scrollRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [transcript]);
+
+  const showTranscript = transcript.length > 0 && (isActive || isConnecting);
+
   return (
-    <div className="flex items-center gap-1.5">
+    <div className="relative flex items-center gap-1.5">
+      {/* ── live call transcript ─────────────────────────────────────── */}
+      {showTranscript && (
+        <div className="absolute bottom-full right-0 mb-2 w-80 max-w-[80vw] overflow-hidden rounded-lg border border-border bg-card shadow-lg">
+          <div className="flex items-center justify-between border-b border-border px-3 py-2">
+            <span className="text-xs font-semibold">Live transcript</span>
+            {isActive && (
+              <span className="flex items-center gap-1 text-[10px] text-muted-foreground">
+                <span className="h-1.5 w-1.5 rounded-full bg-danger" />
+                recording
+              </span>
+            )}
+          </div>
+          <div ref={scrollRef} className="max-h-64 space-y-2 overflow-y-auto px-3 py-2">
+            {transcript.map((entry) => (
+              <div
+                key={entry.id}
+                className={cn(
+                  "flex flex-col gap-0.5",
+                  entry.speaker === "you" ? "items-end" : "items-start",
+                )}
+              >
+                <span className="text-[10px] uppercase tracking-wide text-muted-foreground">
+                  {entry.speaker === "you" ? "You" : "Maya"}
+                </span>
+                <span
+                  className={cn(
+                    "max-w-[85%] rounded-lg px-2.5 py-1.5 text-xs leading-snug",
+                    entry.speaker === "you"
+                      ? "bg-primary/15 text-foreground"
+                      : "bg-muted text-foreground",
+                    !entry.final && "italic opacity-60",
+                  )}
+                >
+                  {entry.text}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
       {/* ── speaking ripple ─────────────────────────────────────────── */}
       {isActive && (
         <span

@@ -16,20 +16,32 @@ import {
   Room,
   RoomEvent,
   Track,
+  Participant,
   RemoteParticipant,
   RemoteTrack,
   RemoteTrackPublication,
   ConnectionState,
+  type TranscriptionSegment,
 } from "livekit-client";
 import { fetchVoiceToken } from "@/api/voiceApi";
 
 export type VoiceState = "idle" | "connecting" | "active" | "error";
+
+/** One line of the live call transcript (who said it + the text). */
+export interface TranscriptEntry {
+  id: string;
+  speaker: "you" | "agent";
+  text: string;
+  /** false while still being transcribed (interim), true once settled. */
+  final: boolean;
+}
 
 export interface UseVoiceSessionReturn {
   voiceState: VoiceState;
   isMuted: boolean;
   agentSpeaking: boolean;
   errorMessage: string | null;
+  transcript: TranscriptEntry[];
   connect: () => Promise<void>;
   disconnect: () => void;
   toggleMute: () => void;
@@ -40,10 +52,14 @@ export function useVoiceSession(customerId: string): UseVoiceSessionReturn {
   const [isMuted, setIsMuted] = useState(false);
   const [agentSpeaking, setAgentSpeaking] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [transcript, setTranscript] = useState<TranscriptEntry[]>([]);
 
   const roomRef = useRef<Room | null>(null);
   // trackSid → <audio> element — cleaned up on leave/unmount
   const audioEls = useRef<Map<string, HTMLAudioElement>>(new Map());
+  // segmentId → entry; keyed so interim segments update in place and finals
+  // replace them, instead of appending duplicate lines for the same utterance.
+  const transcriptSegs = useRef<Map<string, TranscriptEntry>>(new Map());
 
   // ── cleanup ────────────────────────────────────────────────────────────────
   const cleanup = useCallback(() => {
@@ -124,6 +140,9 @@ export function useVoiceSession(customerId: string): UseVoiceSessionReturn {
 
     setVoiceState("connecting");
     setErrorMessage(null);
+    // Fresh transcript per call (the previous one stays visible until now).
+    transcriptSegs.current.clear();
+    setTranscript([]);
 
     try {
       const { token, url } = await fetchVoiceToken(customerId);
@@ -161,6 +180,26 @@ export function useVoiceSession(customerId: string): UseVoiceSessionReturn {
         const agentSpeaks = speakers.some((p) => p instanceof RemoteParticipant);
         setAgentSpeaking(agentSpeaks);
       });
+
+      // Live transcript — both the agent's TTS and the customer's STT arrive
+      // here as segments. The local participant is "you"; everyone else (the
+      // agent) is "agent". Interim segments share an id with their final, so we
+      // upsert by id and re-emit the ordered list (Map preserves insertion order).
+      room.on(
+        RoomEvent.TranscriptionReceived,
+        (segments: TranscriptionSegment[], participant?: Participant) => {
+          const speaker: "you" | "agent" = participant?.isLocal ? "you" : "agent";
+          for (const seg of segments) {
+            transcriptSegs.current.set(seg.id, {
+              id: seg.id,
+              speaker,
+              text: seg.text,
+              final: seg.final,
+            });
+          }
+          setTranscript(Array.from(transcriptSegs.current.values()));
+        },
+      );
 
       room.on(RoomEvent.Disconnected, () => {
         cleanup();
@@ -209,6 +248,7 @@ export function useVoiceSession(customerId: string): UseVoiceSessionReturn {
     isMuted,
     agentSpeaking,
     errorMessage,
+    transcript,
     connect,
     disconnect,
     toggleMute,
