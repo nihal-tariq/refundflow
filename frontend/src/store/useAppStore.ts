@@ -58,7 +58,19 @@ export const useAppStore = create<AppState>((set) => ({
   setView: (view) => set({ view }),
 
   customerId: "CUST-001",
-  setCustomerId: (id) => set({ customerId: id }),
+  setCustomerId: (id) =>
+    set((state) => {
+      if (state.customerId === id) return { customerId: id };
+      return {
+        customerId: id,
+        conversationId: null,
+        sessionId: null,
+        status: "idle",
+        events: [],
+        decision: null,
+        messages: [],
+      };
+    }),
 
   messages: [],
   addMessage: (message) =>

@@ -71,6 +71,11 @@ class Settings(BaseSettings):
     # Set to 0 to disable for production/throughput.
     node_delay_seconds: float = 0.35
 
+    # ── LiveKit voice agent (optional) ────────────────────────────────────
+    livekit_url: str | None = Field(default=None)
+    livekit_api_key: str | None = Field(default=None)
+    livekit_api_secret: str | None = Field(default=None)
+
     # ── Logging ────────────────────────────────────────────────────────────
     log_level: str = "INFO"
     log_json: bool = True

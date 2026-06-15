@@ -51,6 +51,8 @@ def make_customer_lookup_node(ctx: NodeContext) -> NodeFn:
                     tool="customer_lookup", tool_result=data,
                 )],
             }
+
+            
         except CustomerLookupError as exc:
             update = _failure(state, str(exc))
             await ctx.observer.emit(

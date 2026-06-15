@@ -1,8 +1,8 @@
 # RefundFlow AI — AI Customer Support Agent
 
-An AI customer support agent for an e-commerce store. A customer chats with the assistant to request a refund; an agent built with **LangGraph** looks up the customer and the order, validates the request against a strict refund policy, runs a fraud check, and then **approves**, **denies**, or **escalates** the refund. An admin console shows the agent's reasoning, tool calls, and full execution trace **in real time**.
+An AI customer support agent for an e-commerce store. A customer chats with the assistant — by **text or voice** — to request a refund; an agent built with **LangGraph** looks up the customer and the order, validates the request against a strict refund policy, runs a fraud check, and then **approves**, **denies**, or **escalates** the refund. An admin console shows the agent's reasoning, tool calls, and full execution trace **in real time**.
 
-Built with FastAPI + LangGraph on the backend and React + TypeScript on the frontend.
+Built with FastAPI + LangGraph on the backend and React + TypeScript on the frontend, with a **LiveKit** voice channel (Maya) that reuses the exact same decision engine.
 
 ![Customer chat](docs/screenshot-chat.png)
 
@@ -15,7 +15,7 @@ Built with FastAPI + LangGraph on the backend and React + TypeScript on the fron
 | Agent backend with dynamic tool calls | `backend/app/agents/` — a LangGraph workflow that calls 4 tools (customer lookup, order lookup, policy validator, fraud check) and routes to Approve / Deny / Escalate |
 | Customer chat interface | The default view — a clean, helpdesk-style chat |
 | Admin dashboard with real-time reasoning logs | The second sidebar view — live reasoning, tool-call logs, state inspector, and replayable execution history, streamed over Server-Sent Events (no polling) |
-| Voice pipeline (bonus) | Not implemented; the event-driven backend leaves a clean seam for a LiveKit/Realtime integration |
+| Voice pipeline (bonus) | **Implemented** — `backend/voice_agent.py` is a LiveKit agent (STT → LLM → TTS) that calls the same tools and decision engine as the text channel; the browser joins via `frontend/src/hooks/useVoiceSession.ts`. See [Voice channel](#voice-channel-maya) |
 
 ## What happens when a customer asks for a refund
 
@@ -38,6 +38,37 @@ graph LR
 
 **The LLM never makes the refund decision.** Deterministic tools and a policy engine decide; the LLM is only used to phrase the customer-facing reply — and it is given only a pre-computed, customer-safe reason, never the internal rationale, so signals like fraud scores can't leak into the chat. This makes every decision reproducible, auditable, and safe — and it means the whole app runs with **no API key at all**, falling back to a templated responder. With an API key, Anthropic works out of the box; any other major provider (OpenAI, Gemini, Groq, Mistral, Ollama) plugs in with a few lines of `.env` config (see [Using a real LLM](#using-a-real-llm-optional)).
 
+This same principle carries straight into voice: the voice agent calls the **same tools and the same `DecisionService`** as the text graph. The LLM in the voice pipeline orchestrates tool calls and narrates the verdict — it never computes the verdict. Text and voice are two front-ends over one decision engine.
+
+## Voice channel (Maya)
+
+Customers can press the phone button in the composer and talk to **Maya**, a real-time voice agent, instead of typing. It is a [LiveKit Agents](https://docs.livekit.io/agents/) worker — a separate long-running process from the FastAPI app — wired as a classic cascading voice pipeline:
+
+```mermaid
+graph LR
+    Mic[Browser mic] -->|WebRTC| LK[LiveKit Cloud room]
+    LK --> STT[Deepgram nova-3 STT]
+    STT --> TD[Turn detector + VAD]
+    TD --> LLM[GPT-4o-mini ＋ function tools]
+    LLM -->|tool calls| ENG[RefundFlow tools + DecisionService]
+    ENG --> LLM
+    LLM --> TTS[Cartesia TTS]
+    TTS -->|WebRTC| LK --> Spk[Browser speaker]
+```
+
+How the pieces fit:
+
+- **Identity without asking.** The token endpoint mints a room named `refundflow-<customer_id>`. The worker parses the customer ID back out of the room name (`backend/voice_agent.py:_customer_id_from_room`) and **pre-loads the profile before the call starts** — so Maya greets the customer by name and never asks them to read a customer ID aloud (which STT mangles anyway). This mirrors the text channel's identity model exactly.
+- **Account-scoped tools.** The agent exposes three `@function_tool` methods — `list_my_orders`, `look_up_order`, `check_refund_eligibility` — all bound to the authenticated caller. `look_up_order` and `check_refund_eligibility` reject any order that isn't on the caller's account.
+- **Same decision engine.** `check_refund_eligibility` runs the identical `FraudCheckTool` → `PolicyValidatorTool` → `DecisionService` chain the LangGraph nodes use, so a refund gets the same verdict whether the customer typed it or spoke it.
+- **Decision-first, leak-proof phrasing.** Maya's system prompt forces verdict-first replies ("Your refund for X is approved…") and forbids saying "fraud", reading out scores, or inventing policy — the same sanitization contract as text.
+- **Dispatch-on-join.** The worker registers with an explicit `agent_name` (`refundflow-voice`), so it never auto-joins random rooms. The token embeds `RoomConfiguration(agents=[RoomAgentDispatch(...)])`, which tells LiveKit to spin Maya into the room the instant the browser connects.
+- **Live transcript.** The browser listens for `RoomEvent.TranscriptionReceived` and renders both sides of the call (You / Maya) in a floating panel, upserting interim segments by ID so partials update in place.
+
+> **Why no PyTorch?** The turn-detector plugin ships an ONNX model (`model_q8.onnx`) and runs inference through `onnxruntime`; `transformers` is pulled in only for its tokenizer. The "PyTorch not found" log line is cosmetic — the pipeline does not need it.
+
+See [Running the voice agent](#running-the-voice-agent-optional) to start it.
+
 ## Quickstart
 
 Backend (Python 3.12+):
@@ -59,7 +90,42 @@ npm run dev
 
 Open http://localhost:5173 — chat is the default view; the admin console is the second icon in the sidebar (or http://localhost:5173/?view=admin). API docs: http://localhost:8000/docs.
 
-No configuration is required to run the demo.
+No configuration is required to run the demo — text chat, the admin console, and all scenarios work out of the box. The voice channel is the one feature that needs credentials; see below.
+
+## Running the voice agent (optional)
+
+The voice channel needs (1) the optional voice dependencies installed, (2) LiveKit Cloud credentials, and (3) the worker process running alongside the API.
+
+**1. Install the voice dependencies** (commented out in `requirements.txt` by default):
+
+```bash
+cd backend && source .venv/bin/activate
+pip install "livekit-agents[silero]>=1.0" \
+            livekit-plugins-ai-coustics \
+            livekit-plugins-turn-detector \
+            "livekit-api>=0.7"
+```
+
+**2. Add LiveKit credentials** to `backend/.env` (free project at https://cloud.livekit.io):
+
+```ini
+LIVEKIT_URL=wss://your-project.livekit.cloud
+LIVEKIT_API_KEY=your_api_key
+LIVEKIT_API_SECRET=your_api_secret
+```
+
+The STT/LLM/TTS models run through LiveKit's hosted **inference** gateway, so no separate Deepgram/Cartesia keys are required for the demo.
+
+**3. Download the turn-detector model once, then run the worker** (a process separate from `uvicorn`):
+
+```bash
+python voice_agent.py download-files   # one-time: fetches the ONNX turn-detector model
+python voice_agent.py dev              # hot-reload worker; use `start` in production
+```
+
+You should see the worker register: `registered worker … agent_name=refundflow-voice`. Now click the **phone icon** in the chat composer (frontend already running from the Quickstart) and talk to Maya. The live transcript appears above the button.
+
+Without `LIVEKIT_*` set, the `/voice/token` endpoint returns `503` and the phone button surfaces a "voice unavailable" tooltip — the rest of the app is unaffected.
 
 ## Demo scenarios
 
@@ -103,9 +169,10 @@ Install the matching package (`pip install langchain-groq`) and restart. Without
 | Agent workflow | LangGraph (state machine with checkpointing) |
 | Backend | FastAPI, Pydantic v2, SQLAlchemy, SQLite, structlog |
 | Real-time | Server-Sent Events (sse-starlette) |
-| Frontend | React 18, TypeScript, Vite, TailwindCSS, Framer Motion |
+| Voice | LiveKit Agents (STT → LLM → TTS), Deepgram nova-3, Cartesia Sonic, Silero VAD, multilingual turn detector |
+| Frontend | React 18, TypeScript, Vite, TailwindCSS, Framer Motion, livekit-client |
 | Data fetching / state | TanStack Query, Zustand |
-| Testing | pytest (41 backend tests), Vitest + React Testing Library |
+| Testing | pytest (54 backend tests), Vitest + React Testing Library |
 
 ## Project structure
 
@@ -119,12 +186,13 @@ backend/
     api/v1/        REST + SSE routes (no business logic in routes)
     schemas/       Pydantic request/response models
   data/            customers.json, orders.json, refund_policy.md
+  voice_agent.py   LiveKit voice worker (reuses tools + DecisionService)
   tests/
 frontend/
   src/
-    components/    chat/, dashboard/, logs/, ui/
-    hooks/ store/  React Query hooks, Zustand store
-    api/           typed REST client + SSE subscription
+    components/    chat/ (incl. VoiceButton), dashboard/, logs/, ui/
+    hooks/ store/  React Query hooks, Zustand store, useVoiceSession
+    api/           typed REST client + SSE subscription + voiceApi
 ```
 
 Architecture deep-dive with diagrams: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
@@ -139,8 +207,10 @@ cd frontend && npm test     # component and timeline-logic tests
 ## Notes
 
 - **Demo scope:** this is a self-contained demo with no authentication. The customer chat and the admin console are two views of one app, so the `/chat` API returns the full trace for the admin dashboard to render. In production these would be split: a slim customer response and an authenticated admin/observability stream. The customer-facing *message* itself is always sanitized.
-- **Voice (bonus):** not implemented. The event-driven backend (SSE) is structured to make adding a LiveKit / OpenAI Realtime voice channel straightforward.
+- **Voice (bonus):** implemented as a separate LiveKit worker (`backend/voice_agent.py`) that reuses the same tools and `DecisionService` as text. It's optional and credential-gated, so the core demo runs without it. Two demo-scope caveats: the voice channel trusts the room name as the caller's identity (production would verify ownership server-side before minting a token), and `backend/.env` carries provider keys in plaintext (rotate any key that's been committed).
 
 ## Walkthrough video
 
-> 🎥 _Add your Loom link here._ Suggested 7-10 min flow: run the approve scenario in chat, switch to the admin console to show the live reasoning and tool calls, then demo a denial and an escalation, and finish with a historical trace replay.
+> 🎥 _Add your Loom link here._
+
+A full, scripted demo walkthrough — covering both the AI/architecture story and the business layer, with a suggested run order and talking points for the text chat, the admin console, and the voice channel — lives in [GUIDE.md](GUIDE.md).

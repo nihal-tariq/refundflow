@@ -28,6 +28,7 @@ def db_session():
     """Yield a throwaway DB session against fresh tables."""
     from app.models.base import Base, SessionLocal, _engine
 
+    Base.metadata.drop_all(bind=_engine)
     Base.metadata.create_all(bind=_engine)
     session = SessionLocal()
     try:
