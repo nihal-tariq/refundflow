@@ -208,9 +208,3 @@ cd frontend && npm test     # component and timeline-logic tests
 
 - **Demo scope:** this is a self-contained demo with no authentication. The customer chat and the admin console are two views of one app, so the `/chat` API returns the full trace for the admin dashboard to render. In production these would be split: a slim customer response and an authenticated admin/observability stream. The customer-facing *message* itself is always sanitized.
 - **Voice (bonus):** implemented as a separate LiveKit worker (`backend/voice_agent.py`) that reuses the same tools and `DecisionService` as text. It's optional and credential-gated, so the core demo runs without it. Two demo-scope caveats: the voice channel trusts the room name as the caller's identity (production would verify ownership server-side before minting a token), and `backend/.env` carries provider keys in plaintext (rotate any key that's been committed).
-
-## Walkthrough video
-
-> 🎥 _Add your Loom link here._
-
-A full, scripted demo walkthrough — covering both the AI/architecture story and the business layer, with a suggested run order and talking points for the text chat, the admin console, and the voice channel — lives in [GUIDE.md](GUIDE.md).
