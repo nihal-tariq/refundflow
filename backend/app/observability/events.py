@@ -14,14 +14,14 @@ from __future__ import annotations
 import asyncio
 from collections import defaultdict
 from datetime import datetime, timezone
-from enum import StrEnum
+from enum import Enum
 from typing import Any, AsyncIterator
 from uuid import uuid4
 
 from pydantic import BaseModel, Field
 
 
-class EventType(StrEnum):
+class EventType(str, Enum):
     """Canonical agent lifecycle event types streamed to the dashboard."""
 
     EXECUTION_STARTED = "execution_started"

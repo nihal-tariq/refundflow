@@ -15,6 +15,7 @@ import { apiGet, apiPost } from "./client";
 export interface ChatPayload {
   customer_id: string;
   message: string;
+  conversation_id?: string;
   session_id?: string;
   order_id?: string;
   reason?: string;

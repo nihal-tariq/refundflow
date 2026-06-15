@@ -63,7 +63,7 @@ export function CustomerExperience() {
 
   const sendFreeText = () => {
     if (!draft.trim() || running) return;
-    launch({ customerId, orderId, reason: reason || draft, message: draft.trim() });
+    launch({ customerId, message: draft.trim() });
     setDraft("");
   };
 

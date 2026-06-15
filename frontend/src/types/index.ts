@@ -79,6 +79,7 @@ export interface RefundDecisionResponse {
 
 export interface ChatResponse {
   session_id: string;
+  conversation_id: string | null;
   reply: string;
   decision: Decision | null;
   decision_detail: RefundDecisionResponse | null;

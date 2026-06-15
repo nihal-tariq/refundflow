@@ -51,8 +51,11 @@ class ChatRequest(BaseModel):
 
     customer_id: str = Field(examples=["CUST-001"])
     message: str = Field(min_length=1)
+    conversation_id: str | None = Field(
+        default=None, description="Stable id for a multi-turn chat conversation."
+    )
     session_id: str | None = Field(
-        default=None, description="Resume an existing session if provided."
+        default=None, description="Execution/turn id used for live trace streaming."
     )
     order_id: str | None = None
     reason: str | None = None
@@ -63,6 +66,7 @@ class ChatResponse(BaseModel):
     """The agent's conversational reply, optionally carrying a decision."""
 
     session_id: str
+    conversation_id: str | None = None
     reply: str
     decision: DecisionType | None = None
     decision_detail: RefundDecisionResponse | None = None
