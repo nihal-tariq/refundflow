@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from enum import StrEnum
+from enum import Enum
 
 from pydantic import BaseModel, Field
 
 
-class DecisionType(StrEnum):
+class DecisionType(str, Enum):
     """The three terminal outcomes of the refund workflow."""
 
     APPROVED = "APPROVED"

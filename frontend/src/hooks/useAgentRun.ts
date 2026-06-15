@@ -25,8 +25,8 @@ function newSessionId(): string {
 export interface RunArgs {
   customerId: string;
   message: string;
-  orderId: string;
-  reason: string;
+  orderId?: string;
+  reason?: string;
   evidenceProvided?: boolean;
 }
 
@@ -42,12 +42,16 @@ export function useAgentRun() {
     finishRun,
     addMessage,
     updateMessage,
+    conversationId,
+    setConversationId,
   } = useAppStore();
 
   const run = useCallback(
     async (args: RunArgs) => {
       cleanupRef.current?.();
       const sessionId = newSessionId();
+      const activeConversationId = conversationId ?? newSessionId();
+      if (!conversationId) setConversationId(activeConversationId);
       startRun(sessionId);
 
       // Optimistic transcript: user message + pending agent bubble.
@@ -59,16 +63,18 @@ export function useAgentRun() {
       const payload: ChatPayload = {
         customer_id: args.customerId,
         message: args.message,
+        conversation_id: activeConversationId,
         session_id: sessionId,
-        order_id: args.orderId,
-        reason: args.reason,
         evidence_provided: args.evidenceProvided,
       };
+      if (args.orderId) payload.order_id = args.orderId;
+      if (args.reason) payload.reason = args.reason;
 
       const fire = async () => {
         try {
           const response = await sendChat(payload);
           finishRun(response.decision_detail, "completed");
+          if (response.conversation_id) setConversationId(response.conversation_id);
           updateMessage(agentId, {
             content: response.reply,
             decision: response.decision,
@@ -109,7 +115,16 @@ export function useAgentRun() {
       // Safety net: fire the request even if `onOpen` is delayed.
       setTimeout(fireOnce, 600);
     },
-    [startRun, pushEvent, finishRun, addMessage, updateMessage, queryClient],
+    [
+      startRun,
+      pushEvent,
+      finishRun,
+      addMessage,
+      updateMessage,
+      conversationId,
+      setConversationId,
+      queryClient,
+    ],
   );
 
   return { run };

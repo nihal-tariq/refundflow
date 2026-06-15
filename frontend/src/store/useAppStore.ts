@@ -38,6 +38,8 @@ interface AppState {
   resetChat: () => void;
 
   // Active execution
+  conversationId: string | null;
+  setConversationId: (id: string | null) => void;
   sessionId: string | null;
   status: RunStatus;
   events: AgentEvent[];
@@ -65,8 +67,18 @@ export const useAppStore = create<AppState>((set) => ({
     set((state) => ({
       messages: state.messages.map((m) => (m.id === id ? { ...m, ...patch } : m)),
     })),
-  resetChat: () => set({ messages: [], decision: null, events: [], sessionId: null, status: "idle" }),
+  resetChat: () =>
+    set({
+      messages: [],
+      decision: null,
+      events: [],
+      conversationId: null,
+      sessionId: null,
+      status: "idle",
+    }),
 
+  conversationId: null,
+  setConversationId: (id) => set({ conversationId: id }),
   sessionId: null,
   status: "idle",
   events: [],
