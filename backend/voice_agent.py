@@ -75,39 +75,106 @@ _fraud_tool = FraudCheckTool()
 _decision_service = DecisionService()
 
 
-# ── LiveKit function tools ───────────────────────────────────────────────────
+# ── Agent definition ─────────────────────────────────────────────────────────
 
-@function_tool
-def look_up_customer(customer_id: str) -> str:
-    """Look up a customer's account details by their customer ID (e.g. CUST-001).
 
-    Returns the customer's name, account tier (standard/vip), fraud risk score,
-    and refund history summary.  Call this first to verify the caller.
+def _build_instructions(profile: CustomerProfile | None, customer_id: str) -> str:
+    """Build Maya's system prompt, pre-bound to the authenticated caller."""
+    if profile is not None:
+        who = (
+            f"You are already speaking with {profile.name} (customer {customer_id}, "
+            f"{profile.tier} tier). Their account is already loaded — NEVER ask for a "
+            "customer ID, and never call any tool to verify their identity."
+        )
+    else:
+        who = (
+            "You could not load this caller's account automatically. Apologize briefly, "
+            "tell them a support specialist will follow up, and do not attempt a refund."
+        )
+
+    return f"""You are Maya, the voice customer-support agent for RefundFlow, an e-commerce platform.
+
+{who}
+
+## Handling a refund
+1. You have already greeted the caller. When they want a refund you need just two things: which order, and why.
+2. Ask which order. They can say an order number (like O-R-D dash one-zero-zero-one) or simply describe the item ("my headphones", "the jacket"). If they describe it, call list_my_orders and match it to an order. If more than one order could match, ask which one they mean — never guess.
+3. Ask the reason for the refund.
+4. Call check_refund_eligibility with the order id and the reason. Never decide the outcome yourself — only the tool decides.
+5. Give the result decision-first (see below).
+
+## Stating the outcome — lead with the verdict, no apologetic preamble
+- APPROVED: Lead with the good news. "Your refund for <product>, <amount>, is approved — it goes back to your original payment method in five to ten business days."
+- DENIED: State it plainly with the plain-language reason. "Your refund for <product> can't be approved because <reason>." Offer to connect them with a specialist if they have questions.
+- ESCALATED: "Your refund for <product> needs a specialist to review it." They'll hear back within one business day and nothing is needed from them.
+
+## Rules
+- Never invent order details, decisions, amounts, or policies — state only what the tools return.
+- Never say the word "fraud" or read out fraud scores, rule IDs, or other internal fields.
+- Keep replies short: one or two sentences, one question at a time.
+- Speak plain conversational English — no lists, markdown, or acronyms.
+- When confirming an order id, spell it out one letter and digit at a time."""
+
+
+class RefundVoiceAgent(Agent):
+    """Voice refund agent, pre-bound to one authenticated caller.
+
+    The caller's identity comes from the LiveKit room name
+    (``refundflow-<customer_id>``), so — exactly like the text channel — we never
+    ask them to recite their customer ID. The refund decision is produced by the
+    same policy + fraud stack as chat, never invented by the model.
     """
-    try:
-        profile = _customer_tool.run(customer_id)
+
+    def __init__(self, customer_id: str, profile: CustomerProfile | None) -> None:
+        self._customer_id = customer_id
+        self._profile = profile
+        super().__init__(instructions=_build_instructions(profile, customer_id))
+
+    async def on_enter(self) -> None:
+        """Greet the caller by name as soon as they connect."""
+        if self._profile is not None:
+            instructions = (
+                f"Greet {self._profile.name.split()[0]} warmly by first name, say they've "
+                "reached RefundFlow support, and ask how you can help today. One or two sentences."
+            )
+        else:
+            instructions = (
+                "Greet the caller, say they've reached RefundFlow support, and ask how you "
+                "can help today. One or two sentences."
+            )
+        await self.session.generate_reply(instructions=instructions, allow_interruptions=True)
+
+    # ── tools (the customer is bound from the room, never asked for) ──────────
+
+    @function_tool
+    async def list_my_orders(self) -> str:
+        """List the caller's orders. Use this when they describe an item
+        ("my headphones", "that jacket") instead of giving an order number."""
+        orders = _order_tool.for_customer(self._customer_id)
+        if not orders:
+            return json.dumps({"orders": [], "message": "No orders found on this account."})
         return json.dumps({
-            "found": True,
-            "customer_id": profile.customer_id,
-            "name": profile.name,
-            "tier": profile.tier,
-            "account_age_days": profile.account_age_days,
-            "fraud_risk_score": profile.fraud_risk_score,
-            "refund_history_count": len(profile.refund_history),
+            "orders": [
+                {
+                    "order_id": o.order_id,
+                    "product_name": o.product_name,
+                    "purchase_date": o.purchase_date,
+                    "amount": o.amount,
+                }
+                for o in orders
+            ]
         })
-    except CustomerLookupError:
-        return json.dumps({"found": False, "error": f"No account found for '{customer_id}'."})
 
-
-@function_tool
-def look_up_order(order_id: str) -> str:
-    """Look up an order by its order ID (e.g. ORD-1001).
-
-    Returns product name, purchase date, amount, category, and whether the item
-    is digital or final-sale.  Call this after confirming the customer's identity.
-    """
-    try:
-        order = _order_tool.run(order_id)
+    @function_tool
+    async def look_up_order(self, order_id: str) -> str:
+        """Look up one of the caller's orders by its order ID (e.g. ORD-1001):
+        product name, purchase date, amount, and category."""
+        try:
+            order = _order_tool.run(order_id)
+        except OrderLookupError:
+            return json.dumps({"found": False, "error": f"Order {order_id} could not be found."})
+        if order.customer_id != self._customer_id:
+            return json.dumps({"found": False, "error": f"Order {order_id} is not on this account."})
         return json.dumps({
             "found": True,
             "order_id": order.order_id,
@@ -117,139 +184,51 @@ def look_up_order(order_id: str) -> str:
             "category": order.category,
             "is_digital": order.is_digital,
             "is_final_sale": order.is_final_sale,
-            "customer_id": order.customer_id,
         })
-    except OrderLookupError:
-        return json.dumps({"found": False, "error": f"Order '{order_id}' could not be found."})
 
+    @function_tool
+    async def check_refund_eligibility(
+        self,
+        order_id: str,
+        reason: str,
+        evidence_provided: bool = False,
+    ) -> str:
+        """Run the full refund check for the caller's order and return the final
+        decision (APPROVED, DENIED, or ESCALATED) along with the product and amount.
 
-@function_tool
-def check_refund_eligibility(
-    customer_id: str,
-    order_id: str,
-    reason: str,
-    evidence_provided: bool = False,
-) -> str:
-    """Run the full refund eligibility check for a customer and order.
+        Args:
+            order_id: The order being claimed for a refund.
+            reason: The caller's stated reason for requesting a refund.
+            evidence_provided: Whether the caller has photographic evidence.
+        """
+        try:
+            customer = _customer_tool.run(self._customer_id)
+            order = _order_tool.run(order_id)
+        except (CustomerLookupError, OrderLookupError) as exc:
+            return json.dumps({"decision": "ESCALATED", "error": str(exc)})
 
-    Evaluates all policy rules (return window, product type, refund frequency,
-    fraud risk, evidence requirements) and returns a structured eligibility
-    result with the final decision: APPROVED, DENIED, or ESCALATED.
+        if order.customer_id != self._customer_id:
+            return json.dumps({
+                "decision": "DENIED",
+                "error": f"Order {order_id} is not on this account.",
+            })
 
-    Args:
-        customer_id: The customer's CRM identifier.
-        order_id: The order being claimed for a refund.
-        reason: The customer's stated reason for requesting a refund.
-        evidence_provided: Whether the customer has attached photographic evidence.
-    """
-    try:
-        customer = _customer_tool.run(customer_id)
-        order = _order_tool.run(order_id)
-    except (CustomerLookupError, OrderLookupError) as exc:
-        return json.dumps({"decision": "ESCALATED", "error": str(exc)})
+        fraud_result = _fraud_tool.run(customer)
+        policy_result = _policy_tool.run(customer, order, reason, fraud_result, evidence_provided)
+        decision = _decision_service.decide(policy_result, fraud_result, customer)
 
-    fraud_result = _fraud_tool.run(customer)
-    policy_result = _policy_tool.run(customer, order, reason, fraud_result, evidence_provided)
-
-    decision = _decision_service.decide(policy_result, fraud_result, customer)
-
-    violations = [
-        {"rule": v.rule_id, "code": v.reason_code, "severity": v.severity}
-        for v in policy_result.violations
-    ]
-    return json.dumps({
-        "decision": decision.value,
-        "policy_approved": policy_result.approved,
-        "fraud_band": fraud_result.band,
-        "fraud_score": fraud_result.risk_score,
-        "violations": violations,
-        "product": order.product_name,
-        "amount": order.amount,
-        "purchase_date": order.purchase_date,
-    })
-
-
-@function_tool
-def list_customer_orders(customer_id: str) -> str:
-    """List all orders belonging to a customer.
-
-    Useful when the customer says 'my headphones' or 'that jacket I ordered'
-    and you need to match their description to an order ID.
-    """
-    orders = _order_tool.for_customer(customer_id)
-    if not orders:
-        return json.dumps({"orders": [], "message": "No orders found for this customer."})
-    return json.dumps({
-        "orders": [
-            {
-                "order_id": o.order_id,
-                "product_name": o.product_name,
-                "purchase_date": o.purchase_date,
-                "amount": o.amount,
-            }
-            for o in orders
+        violations = [
+            {"rule": v.rule_id, "code": v.reason_code, "severity": v.severity}
+            for v in policy_result.violations
         ]
-    })
-
-
-# ── Agent definition ─────────────────────────────────────────────────────────
-
-class RefundVoiceAgent(Agent):
-    """Voice-enabled refund support agent for RefundFlow.
-
-    Shares the same deterministic tool stack as the text chat.  The LLM
-    orchestrates tool calls; the refund decision is produced by policy +
-    fraud logic, never invented by the model.
-    """
-
-    def __init__(self) -> None:
-        super().__init__(
-            instructions="""You are Maya, a warm and professional customer support voice agent for RefundFlow, an e-commerce platform.
-
-Your job is to help customers with refund requests by gathering the necessary information and checking their eligibility using the available tools.
-
-## How to handle a refund request
-
-1. Greet the customer and ask how you can help.
-2. If they mention a refund, ask for their customer ID (it looks like C-U-S-T dash followed by numbers).
-3. Call look_up_customer to verify their account. If not found, apologize and ask them to check their ID.
-4. Ask for the order ID they want to refund (it looks like O-R-D dash followed by numbers). If they describe the item instead, call list_customer_orders to find the right order.
-5. Ask for the reason they want a refund.
-6. Call check_refund_eligibility with all the information you have gathered.
-7. Tell the customer the result clearly and empathetically.
-
-## Decision outcomes
-
-- APPROVED: Congratulate the customer. Tell them the refund for the specific product and amount will be credited to their original payment method within five to ten business days.
-- DENIED: Be empathetic. Explain in plain language why it was not approved. Offer to connect them with a specialist if they have questions.
-- ESCALATED: Reassure the customer. Tell them a specialist will personally review their case within one business day and no action is needed from them.
-
-## Rules
-
-- Always verify the customer ID before looking up orders.
-- Never invent order details, refund decisions, amounts, or policies.
-- If the customer is frustrated, acknowledge their feelings calmly before proceeding.
-- Do not read out raw identifiers or technical fields like fraud scores or rule IDs.
-- Keep replies brief: one to three sentences, one question at a time.
-- Speak in plain conversational English. No lists, markdown, or acronyms.
-- Spell out identifiers letter by letter when confirming them with the customer.""",
-            tools=[
-                look_up_customer,
-                look_up_order,
-                list_customer_orders,
-                check_refund_eligibility,
-            ],
-        )
-
-    async def on_enter(self) -> None:
-        """Greet the customer when they connect."""
-        await self.session.generate_reply(
-            instructions=(
-                "Greet the customer warmly. Tell them they have reached RefundFlow support "
-                "and ask what you can help them with today. Keep it to one or two sentences."
-            ),
-            allow_interruptions=True,
-        )
+        return json.dumps({
+            "decision": decision.value,
+            "policy_approved": policy_result.approved,
+            "violations": violations,
+            "product": order.product_name,
+            "amount": order.amount,
+            "purchase_date": order.purchase_date,
+        })
 
 
 # ── Server wiring ────────────────────────────────────────────────────────────
@@ -265,9 +244,32 @@ def prewarm(proc: JobProcess) -> None:
 server.setup_fnc = prewarm
 
 
+def _customer_id_from_room(room_name: str) -> str:
+    """Recover the CRM customer id from the room name (``refundflow-<id>``).
+
+    The token endpoint lower-cases the id into the room name, so we upper-case
+    it back to match the CRM (e.g. ``refundflow-cust-001`` -> ``CUST-001``).
+    """
+    prefix = "refundflow-"
+    raw = room_name[len(prefix):] if room_name.startswith(prefix) else room_name
+    return raw.upper()
+
+
 @server.rtc_session(agent_name="refundflow-voice")
 async def entrypoint(ctx: JobContext) -> None:
     """Main session handler — wires STT / LLM / TTS and starts the agent."""
+    customer_id = _customer_id_from_room(ctx.room.name)
+    try:
+        profile: CustomerProfile | None = _customer_tool.run(customer_id)
+        logger.info("voice session bound to %s (%s)", customer_id, profile.name)
+    except CustomerLookupError:
+        profile = None
+        logger.warning(
+            "voice session could not resolve customer %s from room %s",
+            customer_id,
+            ctx.room.name,
+        )
+
     session = AgentSession(
         stt=inference.STT(model="deepgram/nova-3", language="en"),
         llm=inference.LLM(
@@ -287,7 +289,7 @@ async def entrypoint(ctx: JobContext) -> None:
     )
 
     await session.start(
-        agent=RefundVoiceAgent(),
+        agent=RefundVoiceAgent(customer_id=customer_id, profile=profile),
         room=ctx.room,
         room_options=room_io.RoomOptions(
             audio_input=room_io.AudioInputOptions(

@@ -8,19 +8,19 @@ This means every unique customer gets their own isolated room, and the
 voice agent's dispatch rule should target agent_name="refundflow-voice"
 on any room matching the pattern `refundflow-*`.
 
-Setup (add to backend/.env):
-    LIVEKIT_URL=wss://your-project.livekit.cloud
-    LIVEKIT_API_KEY=your_api_key
-    LIVEKIT_API_SECRET=your_api_secret
+Credentials are sourced from Settings (loaded from .env) so they respect
+the same configuration system as every other backend setting.
 """
 
 from __future__ import annotations
 
-import os
-import time
+import datetime
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
+
+from app.config import get_settings
+from app.config.settings import Settings
 
 router = APIRouter(tags=["voice"])
 
@@ -40,18 +40,17 @@ class VoiceTokenResponse(BaseModel):
     response_model=VoiceTokenResponse,
     summary="Generate a LiveKit access token for the voice agent room",
 )
-def get_voice_token(request: VoiceTokenRequest) -> VoiceTokenResponse:
+def get_voice_token(
+    request: VoiceTokenRequest,
+    settings: Settings = Depends(get_settings),
+) -> VoiceTokenResponse:
     """Return a signed LiveKit JWT so the browser can join the voice room.
 
     The token grants the caller permission to publish (mic) and subscribe
     (agent audio) for the room dedicated to their customer_id.  It expires
     after 10 minutes — plenty for a typical support call.
     """
-    api_key = os.getenv("LIVEKIT_API_KEY", "")
-    api_secret = os.getenv("LIVEKIT_API_SECRET", "")
-    livekit_url = os.getenv("LIVEKIT_URL", "")
-
-    if not api_key or not api_secret or not livekit_url:
+    if not settings.livekit_url or not settings.livekit_api_key or not settings.livekit_api_secret:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail=(
@@ -61,7 +60,12 @@ def get_voice_token(request: VoiceTokenRequest) -> VoiceTokenResponse:
         )
 
     try:
-        from livekit.api import AccessToken, VideoGrants  # type: ignore[import]
+        from livekit.api import (  # type: ignore[import]
+            AccessToken,
+            RoomAgentDispatch,
+            RoomConfiguration,
+            VideoGrants,
+        )
     except ImportError:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -71,8 +75,12 @@ def get_voice_token(request: VoiceTokenRequest) -> VoiceTokenResponse:
     room_name = f"refundflow-{request.customer_id.lower()}"
     identity = f"customer-{request.customer_id.lower()}"
 
+    # The voice worker registers with an explicit agent_name, so it uses
+    # *explicit* dispatch — it never auto-joins rooms. Embedding the dispatch in
+    # the token tells LiveKit to spin the agent into this room the moment the
+    # browser connects; without this the customer joins an empty (silent) room.
     token = (
-        AccessToken(api_key=api_key, api_secret=api_secret)
+        AccessToken(api_key=settings.livekit_api_key, api_secret=settings.livekit_api_secret)
         .with_identity(identity)
         .with_name(request.customer_id)
         .with_grants(
@@ -83,8 +91,12 @@ def get_voice_token(request: VoiceTokenRequest) -> VoiceTokenResponse:
                 can_subscribe=True,
             )
         )
-        .with_ttl(600)  # 10-minute token
+        .with_room_config(
+            RoomConfiguration(
+                agents=[RoomAgentDispatch(agent_name="refundflow-voice")],
+            )
+        )
+        .with_ttl(datetime.timedelta(minutes=10))  # 10-minute token
         .to_jwt()
     )
-
-    return VoiceTokenResponse(token=token, url=livekit_url, room_name=room_name)
+    return VoiceTokenResponse(token=token, url=settings.livekit_url, room_name=room_name)
