@@ -8,7 +8,6 @@ helpful prompt for the missing details. No adjudication logic lives here.
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass, field
 from typing import Any
 from uuid import uuid4
@@ -21,22 +20,12 @@ from app.services.llm_service import LLMService
 from app.services.refund_service import RefundService
 from app.tools.order_lookup import OrderLookupError, OrderLookupTool
 
-_THANKS_RE = re.compile(
-    r"^\s*(thanks|thank you|thx|ty|appreciate it|much appreciated)[!. ]*\s*$",
-    re.IGNORECASE,
-)
-_GREETING_RE = re.compile(
-    r"^\s*(hi|hello|hey|good morning|good afternoon)[!. ]*\s*$",
-    re.IGNORECASE,
-)
-_ORDER_ID_RE = re.compile(r"\bORD-\d{4,}\b", re.IGNORECASE)
-_REFUND_WORDS = ("refund", "return", "money back", "exchange")
-
 
 @dataclass
 class ChatSessionState:
     """In-memory conversational state for one customer chat session."""
 
+    customer_id: str | None = None
     messages: list[dict[str, str]] = field(default_factory=list)
     order_id: str | None = None
     reason: str | None = None
@@ -44,6 +33,20 @@ class ChatSessionState:
     refund_runs: int = 0
     last_decision: str | None = None
     last_order_id: str | None = None
+
+    def bind_customer(self, customer_id: str) -> None:
+        """Reset customer-specific state when a conversation changes accounts."""
+        if self.customer_id in (None, customer_id):
+            self.customer_id = customer_id
+            return
+        self.customer_id = customer_id
+        self.messages.clear()
+        self.order_id = None
+        self.reason = None
+        self.evidence_provided = False
+        self.refund_runs = 0
+        self.last_decision = None
+        self.last_order_id = None
 
 
 class ChatService:
@@ -76,6 +79,7 @@ class ChatService:
         session_id = request.session_id or f"sess-{uuid4().hex[:12]}"
         conversation_id = request.conversation_id or session_id
         state = self._sessions.setdefault(conversation_id, ChatSessionState())
+        state.bind_customer(request.customer_id)
         message = request.message.strip()
         state.messages.append({"role": "user", "content": message})
 
@@ -91,30 +95,105 @@ class ChatService:
                 ),
             )
 
-        if _is_gratitude(message):
+        # 1. Classify intent
+        intent = self._llm.classify_intent(message)
+
+        # 2. Handle frustration/abuse
+        if intent == "FRUSTRATION":
+            reply = self._llm.phrase_empathy(customer.name, message)
+            return self._reply(
+                session_id=session_id,
+                conversation_id=conversation_id,
+                state=state,
+                reply=reply,
+            )
+
+        # 3. Handle gratitude
+        if intent == "GRATITUDE":
             return self._reply(
                 session_id=session_id,
                 conversation_id=conversation_id,
                 state=state,
                 reply=(
                     f"You're welcome, {customer.name.split()[0]}! I'm glad I could "
-                    "help. If you need to check another refund, send me the order ID."
+                    "help. Let me know if you need help with anything else."
                 ),
             )
 
-        order_id = _normalize_order_id(request.order_id) or _extract_order_id(message)
+        resolution = None
+
+        # 4. Handle follow-up queries on completed refund request sessions.
+        # A new refund request or a new order reference starts a fresh refund
+        # flow in the same conversation instead of getting trapped as follow-up.
+        if state.last_decision:
+            if intent == "GREETING":
+                return self._reply(
+                    session_id=session_id,
+                    conversation_id=conversation_id,
+                    state=state,
+                    reply=f"Hi {customer.name.split()[0]}! How else can I help you today?",
+                )
+
+            if intent in {"REFUND_REQUEST", "OTHER"}:
+                resolution = self._llm.resolve_order(
+                    message, self._orders.for_customer(request.customer_id)
+                )
+                if (
+                    resolution.order_id
+                    or resolution.mentioned_order_id
+                    or resolution.candidates
+                    or intent == "REFUND_REQUEST"
+                ):
+                    state.last_decision = None
+                    state.last_order_id = None
+                else:
+                    resolution = None
+
+            if state.last_decision is None:
+                pass
+            else:
+                # Phrase a follow-up answer in the context of the last decision.
+                reply = await self._llm.phrase_followup(
+                    customer_name=customer.name,
+                    message=message,
+                    decision=state.last_decision,
+                    order_id=state.last_order_id,
+                )
+                return self._reply(
+                    session_id=session_id,
+                    conversation_id=conversation_id,
+                    state=state,
+                    reply=reply,
+                )
+
+        # 5. Normal slot-filling logic for new/incomplete sessions.
+        order_id = _normalize_explicit_order_id(request.order_id)
+        # Free text is interpreted by the LLM resolver, boxed to this customer's
+        # actual orders. It can match ids, product references, and stated reasons.
+        if not order_id and not state.order_id and intent != "GREETING":
+            resolution = resolution or self._llm.resolve_order(
+                message, self._orders.for_customer(request.customer_id)
+            )
+            if resolution.candidates and not resolution.order_id:
+                return self._reply(
+                    session_id=session_id,
+                    conversation_id=conversation_id,
+                    state=state,
+                    reply=self._clarify_candidates(resolution.candidates),
+                )
+            order_id = resolution.order_id or resolution.mentioned_order_id
+            if order_id and resolution.reason and not request.reason:
+                state.reason = resolution.reason
+
         if order_id:
             state.order_id = order_id
-            state.reason = (
-                request.reason.strip()
-                if request.reason
-                else _reason_from_message(message, order_id)
-            )
+            if not state.reason:
+                state.reason = request.reason.strip() if request.reason else state.reason
             state.evidence_provided = request.evidence_provided
         elif request.reason:
             state.reason = request.reason.strip()
             state.evidence_provided = request.evidence_provided
-        elif state.order_id and not _is_greeting(message):
+        elif state.order_id and intent != "GREETING":
             state.reason = message
 
         if not state.order_id:
@@ -124,7 +203,8 @@ class ChatService:
                 state=state,
                 reply=(
                     f"Hi {customer.name.split()[0]}! I can help with a refund. "
-                    "Please send the order ID, like ORD-1001."
+                    "Please send the order ID (like ORD-1001), or just tell me "
+                    "which item it was."
                 ),
             )
 
@@ -198,6 +278,24 @@ class ChatService:
             decision_detail=detail,
         )
 
+    def _clarify_candidates(self, candidates: list[str]) -> str:
+        """Ask the customer to pick when a reference matched several orders."""
+        labels: list[str] = []
+        for cid in candidates[:4]:
+            try:
+                order = self._orders.run(cid)
+                labels.append(f"{cid} ({order.product_name})")
+            except OrderLookupError:
+                labels.append(cid)
+        if len(labels) > 1:
+            joined = f"{', '.join(labels[:-1])}, or {labels[-1]}"
+        else:
+            joined = labels[0]
+        return (
+            "I found a few orders that could match — which one did you mean? "
+            f"For example: {joined}."
+        )
+
     def _reply(
         self,
         *,
@@ -219,43 +317,8 @@ class ChatService:
         )
 
 
-def _is_gratitude(message: str) -> bool:
-    """Return whether ``message`` is a simple acknowledgement, not a refund turn."""
-    return bool(_THANKS_RE.match(message))
-
-
-def _is_greeting(message: str) -> bool:
-    """Return whether ``message`` is a simple greeting."""
-    return bool(_GREETING_RE.match(message))
-
-
-def _normalize_order_id(order_id: str | None) -> str | None:
-    """Normalize an explicit order id field."""
+def _normalize_explicit_order_id(order_id: str | None) -> str | None:
+    """Normalize an explicit structured order id field."""
     if not order_id:
         return None
-    match = _ORDER_ID_RE.search(order_id)
-    return match.group(0).upper() if match else order_id.strip().upper()
-
-
-def _extract_order_id(message: str) -> str | None:
-    """Extract an order id from a free-text message."""
-    match = _ORDER_ID_RE.search(message)
-    return match.group(0).upper() if match else None
-
-
-def _reason_from_message(message: str, order_id: str) -> str | None:
-    """Use surrounding free text as a reason when the message is more than an id."""
-    cleaned = _ORDER_ID_RE.sub("", message).strip(" .,-:")
-    lowered = cleaned.lower()
-    filler = ("refund", "return", "order", "for", "please", "i want", "i need")
-    if not cleaned or lowered in filler:
-        return None
-    if len(cleaned.split()) < 3 and not _looks_like_refund_reason(cleaned):
-        return None
-    return message.strip()
-
-
-def _looks_like_refund_reason(message: str) -> bool:
-    """Heuristic for messages that should fill the refund-reason slot."""
-    lowered = message.lower()
-    return any(word in lowered for word in _REFUND_WORDS) or len(message.split()) >= 3
+    return order_id.strip().upper()

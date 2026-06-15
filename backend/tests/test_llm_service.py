@@ -77,3 +77,60 @@ def test_escalated_mentions_specialist_and_evidence_hint() -> None:
     assert "specialist" in reply.lower()
     assert "photo" in reply.lower()
     assert "business day" in reply.lower()
+
+
+# ── Order resolution (deterministic fallback, no LLM client) ─────────────────
+
+_SCARF = OrderInfo(
+    order_id="ORD-1031",
+    customer_id="CUST-001",
+    product_name="Cashmere Scarf",
+    product_category="apparel",
+    purchase_date="2026-05-20",
+    amount=89.00,
+)
+_WALLET = OrderInfo(
+    order_id="ORD-1042",
+    customer_id="CUST-001",
+    product_name="Leather Wallet",
+    product_category="apparel",
+    purchase_date="2026-05-22",
+    amount=59.00,
+)
+_ORDERS = [_ORDER, _SCARF, _WALLET]
+
+
+def test_resolve_order_by_number_in_natural_language() -> None:
+    """A bare or lead-in order number resolves to the real ORD- id."""
+    svc = make_service()
+    assert svc.resolve_order("need a refund for order 1001", _ORDERS).order_id == "ORD-1001"
+    assert svc.resolve_order("ORD-1001 please", _ORDERS).order_id == "ORD-1001"
+    assert svc.resolve_order("#1001", _ORDERS).order_id == "ORD-1001"
+
+
+def test_resolve_order_by_product_reference() -> None:
+    """A product reference resolves to that customer's matching order."""
+    res = make_service().resolve_order("need to return my headphones", _ORDERS)
+    assert res.order_id == "ORD-1001"
+    assert res.candidates == []
+
+
+def test_resolve_order_ambiguous_returns_candidates() -> None:
+    """A reference matching several orders yields candidates, not a guess."""
+    res = make_service().resolve_order("I want to return my apparel item", _ORDERS)
+    assert res.order_id is None
+    assert set(res.candidates) == {"ORD-1031", "ORD-1042"}
+
+
+def test_resolve_order_no_match_is_empty() -> None:
+    """An unmatched reference resolves to nothing (no hallucinated order)."""
+    res = make_service().resolve_order("I want to return my drone", _ORDERS)
+    assert res.order_id is None
+    assert res.candidates == []
+
+
+def test_resolve_order_unknown_id_not_invented() -> None:
+    """A number that is not one of the customer's orders does not resolve."""
+    res = make_service().resolve_order("refund order 9999", _ORDERS)
+    assert res.order_id is None
+    assert res.mentioned_order_id == "ORD-9999"

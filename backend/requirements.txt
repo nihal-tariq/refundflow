@@ -35,3 +35,10 @@ structlog>=24.4.0
 pytest>=8.3.4
 pytest-asyncio>=0.25.0
 httpx>=0.28.1
+
+# --- Voice agent (optional) ---
+# Uncomment to enable the LiveKit voice interface (voice_agent.py + /voice/token endpoint).
+# livekit-agents[silero]>=1.0
+# livekit-plugins-ai-coustics
+# livekit-plugins-turn-detector
+# livekit-api>=0.7           # required for the /voice/token backend endpoint

@@ -42,7 +42,6 @@ export function useAgentRun() {
     finishRun,
     addMessage,
     updateMessage,
-    conversationId,
     setConversationId,
   } = useAppStore();
 
@@ -50,8 +49,9 @@ export function useAgentRun() {
     async (args: RunArgs) => {
       cleanupRef.current?.();
       const sessionId = newSessionId();
-      const activeConversationId = conversationId ?? newSessionId();
-      if (!conversationId) setConversationId(activeConversationId);
+      const currentConversationId = useAppStore.getState().conversationId;
+      const activeConversationId = currentConversationId ?? newSessionId();
+      if (!currentConversationId) setConversationId(activeConversationId);
       startRun(sessionId);
 
       // Optimistic transcript: user message + pending agent bubble.
@@ -121,7 +121,6 @@ export function useAgentRun() {
       finishRun,
       addMessage,
       updateMessage,
-      conversationId,
       setConversationId,
       queryClient,
     ],

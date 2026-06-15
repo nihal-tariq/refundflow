@@ -11,6 +11,7 @@ import { ChatTranscript } from "./ChatTranscript";
 import { CustomerIdentity } from "./CustomerIdentity";
 import { RefundForm } from "./RefundForm";
 import { SuggestedPrompts } from "./SuggestedPrompts";
+import { VoiceButton } from "./VoiceButton";
 
 /** Static greeting shown before the first turn (not stored in the transcript). */
 const WELCOME: ChatMessage = {
@@ -164,6 +165,7 @@ export function CustomerExperience() {
               placeholder="Write a message…"
               disabled={running}
             />
+            <VoiceButton customerId={customerId} disabled={running} />
             <Button size="icon" onClick={sendFreeText} disabled={running || !draft.trim()} aria-label="Send">
               <Send className="h-4 w-4" />
             </Button>

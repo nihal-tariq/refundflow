@@ -41,6 +41,14 @@ class OrderLookupTool:
             raise OrderLookupError(f"Order '{order_id}' not found")
         return order
 
+    def for_customer(self, customer_id: str) -> list[OrderInfo]:
+        """Return every order belonging to ``customer_id`` (may be empty).
+
+        Used by the conversational layer to resolve free-text references like
+        "my headphones" against only this customer's own orders.
+        """
+        return self._repo.list_for_customer(customer_id)
+
     def as_tool(self) -> StructuredTool:
         """Adapt :meth:`run` into a LangChain ``StructuredTool``."""
         return StructuredTool.from_function(
