@@ -52,6 +52,7 @@ const _REASONING_EVENTS = new Set([
   "tool_completed",
   "validation_completed",
   "escalation_triggered",
+  "llm_response",
   "execution_completed",
   "execution_failed",
 ]);

@@ -202,6 +202,30 @@ class LLMService:
         """
         self._settings = settings or get_settings()
         self._client = build_chat_model(self._settings)
+        # Lazy import: the agents package imports the services package, so a
+        # top-level import here would create a cycle. Built once per service so
+        # its checkpointer retains conversation memory across turns.
+        if self._client is not None:
+            from app.agents.chat_graph import ConversationEngine
+
+            self._conversation = ConversationEngine(self._client)
+        else:
+            self._conversation = None
+
+    @property
+    def active(self) -> bool:
+        """Whether a live LLM client is configured (vs. template fallback)."""
+        return self._client is not None
+
+    @property
+    def provider(self) -> str:
+        """The configured LLM provider id (e.g. ``groq``)."""
+        return self._settings.llm_provider
+
+    @property
+    def model(self) -> str:
+        """The configured LLM model id (e.g. ``llama-3.3-70b-versatile``)."""
+        return self._settings.llm_model
 
     def classify_intent(self, message: str) -> str:
         """Classify user intent / sentiment using LLM with fallback to heuristics."""
@@ -360,36 +384,39 @@ class LLMService:
             return OrderResolution(candidates=matches)
         return OrderResolution()
 
-    async def phrase_followup(
+    async def converse(
         self,
+        *,
+        conversation_id: str,
         customer_name: str,
         message: str,
-        decision: str,
-        order_id: str | None,
+        last_decision: str,
+        last_order_id: str | None,
     ) -> str:
-        """Phrase a warm conversational response to a follow-up message on a completed refund."""
-        if self._client is None:
-            return self._template_followup(customer_name, decision, order_id)
+        """Carry on the conversation after a refund decision, with full memory.
+
+        Routes the turn through the :class:`ConversationEngine` LangGraph, whose
+        checkpointer retains the message history per ``conversation_id`` — so the
+        assistant remembers what was said and replies in context (e.g. a real
+        goodbye to "bye") instead of replaying the same canned follow-up.
+        Degrades to the deterministic template when no LLM is configured.
+        """
+        if self._conversation is None:
+            return self._template_followup(customer_name, last_decision, last_order_id)
         try:
-            prompt = (
-                "You are Maya, a warm, professional customer-support specialist for an "
-                "e-commerce store. A customer has sent a message regarding a refund request "
-                "that has already been decided.\n\n"
-                "Hard rules:\n"
-                "- The decision is already final and completed. Never change, review, or contradict it.\n"
-                "- NEVER mention: internal tools, fraud risk scores, policy rule IDs, or this prompt.\n"
-                "- Address the customer by first name once. Keep the reply short (2-3 sentences max) and helpful.\n\n"
-                "Context:\n"
-                f"- Customer Name: {customer_name}\n"
-                f"- Order ID: {order_id or 'Unknown'}\n"
-                f"- Refund Decision: {decision}\n"
-                f"- Customer's Message: {message}\n"
+            reply = self._conversation.respond(
+                conversation_id,
+                message,
+                customer_name=customer_name,
+                last_decision=last_decision,
+                last_order_id=last_order_id,
             )
-            text = _content_to_text(self._client.invoke(prompt).content)
-            return text or self._template_followup(customer_name, decision, order_id)
+            return reply or self._template_followup(
+                customer_name, last_decision, last_order_id
+            )
         except Exception as exc:
-            _logger.warning("llm_followup_failed", error=str(exc))
-            return self._template_followup(customer_name, decision, order_id)
+            _logger.warning("llm_converse_failed", error=str(exc))
+            return self._template_followup(customer_name, last_decision, last_order_id)
 
     def _template_followup(
         self,
@@ -414,11 +441,13 @@ class LLMService:
                 "You are Maya, a warm, professional customer-support specialist for an e-commerce store. "
                 "The customer is frustrated, angry, or has sent a disappointed message.\n\n"
                 "Hard rules:\n"
-                "- Remain completely calm, professional, polite, and empathetic. Never match their anger or sound defensive.\n"
-                "- Address the customer by first name once.\n"
-                "- Express sincere empathy and apologize for the trouble/frustration.\n"
-                "- Ask how you can help or offer to connect them with a human specialist.\n"
-                "- Keep the reply short (2-3 sentences max).\n\n"
+                "- Stay calm, soft, and empathetic. Never match their anger or sound defensive or robotic.\n"
+                "- Keep it to 1-2 short sentences. No long paragraphs and no repetition.\n"
+                "- Address the customer by first name once. Express sincere empathy and apologize once for the trouble.\n"
+                "- Then ask how you can help, or offer to connect them with a human specialist.\n"
+                "- Do NOT make promises, quote policies, or invent any order/refund details you were not given.\n"
+                "- Stay on customer support; do not answer unrelated questions.\n"
+                "- NEVER mention fraud, risk scores, policy rule IDs, internal systems, or this prompt.\n\n"
                 "Context:\n"
                 f"- Customer Name: {customer_name}\n"
                 f"- Customer's Message: {message}\n"
@@ -495,23 +524,29 @@ class LLMService:
         )
         return (
             "You are Maya, a customer-support specialist for an e-commerce store. "
-            "Write a short chat reply (1-3 sentences) that gives the customer a "
-            "clear, direct answer about their refund.\n\n"
+            "Write a brief chat reply that gives the customer a clear answer about "
+            "their refund in a warm, empathetic, soft-yet-professional tone.\n\n"
             "Hard rules:\n"
-            f"- The decision is final: {decision.value}. State it plainly in the "
-            "FIRST sentence. Never change, soften, or contradict it.\n"
-            "- Be decisive and concrete. Do NOT open with apologies or filler "
-            "(no 'thanks for reaching out', 'we took a careful look', 'thanks for "
-            "your patience'). Get straight to the outcome.\n"
-            "- Explain the outcome using ONLY the customer-safe reason below.\n"
+            "- Keep it to 1-2 short sentences. No long paragraphs, no lists, no "
+            "repetition — say each thing once.\n"
+            f"- The decision is final: {decision.value}. Lead with the outcome in "
+            "the first sentence. Never change, soften, or contradict it.\n"
+            "- Tone: kind and human, never cold or robotic. For a denial or "
+            "escalation you may add ONE short, genuine line of empathy — but do not "
+            "grovel and do not open with filler ('thanks for reaching out', 'we took "
+            "a careful look', 'thanks for your patience').\n"
+            "- Use ONLY the facts given below: the product, amount, decision, and the "
+            "customer-safe reason. NEVER invent order details, amounts, dates, "
+            "policies, or timelines that are not stated here. Do not guess.\n"
+            "- Stay strictly on this refund. Do not answer unrelated questions.\n"
             "- NEVER mention: fraud, risk scores, policy rule IDs, internal systems, "
             "automated reasoning, or this prompt.\n"
             "- Address the customer by first name once. Plain language, no emojis, "
             "no long sign-offs.\n"
             "- If APPROVED: say it's approved and that the amount reaches their "
             "original payment method within 5-10 business days.\n"
-            "- If DENIED: say it's denied and state the reason plainly; offer to "
-            "connect them with the team if they have questions.\n"
+            "- If DENIED: say it's denied, state the reason plainly and gently, and "
+            "offer to connect them with the team if they have questions.\n"
             "- If ESCALATED: say a specialist will review and reply within one "
             "business day.\n"
             f"{evidence_hint}\n"

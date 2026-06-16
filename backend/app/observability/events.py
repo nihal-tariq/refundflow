@@ -31,6 +31,9 @@ class EventType(str, Enum):
     VALIDATION_COMPLETED = "validation_completed"
     RETRY_ATTEMPT = "retry_attempt"
     ESCALATION_TRIGGERED = "escalation_triggered"
+    # Emitted when the LLM phrasing layer (not the deterministic engine) produced
+    # the customer-facing reply — surfaced in the dashboard alongside tool calls.
+    LLM_RESPONSE = "llm_response"
     EXECUTION_COMPLETED = "execution_completed"
     EXECUTION_FAILED = "execution_failed"
 

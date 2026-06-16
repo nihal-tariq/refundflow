@@ -17,6 +17,7 @@ const EVENT_TYPES: AgentEventType[] = [
   "validation_completed",
   "retry_attempt",
   "escalation_triggered",
+  "llm_response",
   "execution_completed",
   "execution_failed",
 ];

@@ -80,6 +80,22 @@ export function useAgentRun() {
             decision: response.decision,
             pending: false,
           });
+          // The LLM phrasing runs after the graph completes (and after the SSE
+          // stream closes), so surface it in the live feed from the response.
+          if (response.llm_used) {
+            pushEvent({
+              event_id: `llm-${sessionId}`,
+              session_id: sessionId,
+              event_type: "llm_response",
+              node_name: response.decision ? "decision" : null,
+              tool_name: "llm",
+              message: response.decision
+                ? `LLM phrased the ${response.decision} reply`
+                : "LLM generated the response",
+              payload: { reply: response.reply, decision: response.decision ?? null },
+              timestamp: new Date().toISOString(),
+            });
+          }
           queryClient.invalidateQueries({ queryKey: ["sessions"] });
         } catch (error) {
           finishRun(null, "failed");

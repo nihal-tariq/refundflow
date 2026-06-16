@@ -23,7 +23,7 @@ langgraph-checkpoint>=2.0.9
 langchain-anthropic>=0.3.1
 # Uncomment the line matching your LLM_PROVIDER to enable that provider:
 # langchain-openai>=0.2          # LLM_PROVIDER=openai or openai_compatible
-# langchain-groq>=0.2            # LLM_PROVIDER=groq
+langchain-groq>=0.2             # LLM_PROVIDER=groq
 # langchain-google-genai>=2.0    # LLM_PROVIDER=google_genai
 # langchain-mistralai>=0.2       # LLM_PROVIDER=mistral
 # langchain-ollama>=0.2          # LLM_PROVIDER=ollama
@@ -37,8 +37,9 @@ pytest-asyncio>=0.25.0
 httpx>=0.28.1
 
 # --- Voice agent (optional) ---
-# Uncomment to enable the LiveKit voice interface (voice_agent.py + /voice/token endpoint).
-# livekit-agents[silero]>=1.0
-# livekit-plugins-ai-coustics
-# livekit-plugins-turn-detector
-# livekit-api>=0.7           # required for the /voice/token backend endpoint
+# These packages are required for the LiveKit voice interface (voice_agent.py + /voice/token).
+# Remove or comment them out if you are not using the voice channel.
+livekit-agents[silero]>=1.0
+livekit-plugins-ai-coustics
+livekit-plugins-turn-detector
+livekit-api>=0.7           # required for the /voice/token backend endpoint

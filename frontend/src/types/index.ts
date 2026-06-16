@@ -83,6 +83,7 @@ export interface ChatResponse {
   reply: string;
   decision: Decision | null;
   decision_detail: RefundDecisionResponse | null;
+  llm_used: boolean;
 }
 
 export type AgentEventType =
@@ -93,6 +94,7 @@ export type AgentEventType =
   | "validation_completed"
   | "retry_attempt"
   | "escalation_triggered"
+  | "llm_response"
   | "execution_completed"
   | "execution_failed";
 

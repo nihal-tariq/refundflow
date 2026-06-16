@@ -70,3 +70,7 @@ class ChatResponse(BaseModel):
     reply: str
     decision: DecisionType | None = None
     decision_detail: RefundDecisionResponse | None = None
+    llm_used: bool = Field(
+        default=False,
+        description="Whether the LLM phrasing layer (not a template) produced this reply.",
+    )

@@ -14,11 +14,16 @@ from uuid import uuid4
 
 from sqlalchemy.orm import Session
 
+from app.observability.events import EventType
+from app.observability.logging import get_logger
 from app.repositories.customer_repository import CustomerRepository
+from app.repositories.trace_repository import TraceRepository
 from app.schemas.refund import ChatRequest, ChatResponse, RefundRequest
 from app.services.llm_service import LLMService
 from app.services.refund_service import RefundService
 from app.tools.order_lookup import OrderLookupError, OrderLookupTool
+
+_logger = get_logger(__name__)
 
 
 @dataclass
@@ -106,6 +111,7 @@ class ChatService:
                 conversation_id=conversation_id,
                 state=state,
                 reply=reply,
+                llm_used=self._llm.active,
             )
 
         # 3. Handle gratitude
@@ -126,14 +132,6 @@ class ChatService:
         # A new refund request or a new order reference starts a fresh refund
         # flow in the same conversation instead of getting trapped as follow-up.
         if state.last_decision:
-            if intent == "GREETING":
-                return self._reply(
-                    session_id=session_id,
-                    conversation_id=conversation_id,
-                    state=state,
-                    reply=f"Hi {customer.name.split()[0]}! How else can I help you today?",
-                )
-
             if intent in {"REFUND_REQUEST", "OTHER"}:
                 resolution = self._llm.resolve_order(
                     message, self._orders.for_customer(request.customer_id)
@@ -152,18 +150,23 @@ class ChatService:
             if state.last_decision is None:
                 pass
             else:
-                # Phrase a follow-up answer in the context of the last decision.
-                reply = await self._llm.phrase_followup(
+                # Continue the conversation in the context of the last decision.
+                # The chat loop keeps the message history in LangGraph state, so
+                # the bot remembers the back-and-forth instead of replaying the
+                # same answer to every follow-up (e.g. "connect", "bye").
+                reply = await self._llm.converse(
+                    conversation_id=conversation_id,
                     customer_name=customer.name,
                     message=message,
-                    decision=state.last_decision,
-                    order_id=state.last_order_id,
+                    last_decision=state.last_decision,
+                    last_order_id=state.last_order_id,
                 )
                 return self._reply(
                     session_id=session_id,
                     conversation_id=conversation_id,
                     state=state,
                     reply=reply,
+                    llm_used=self._llm.active,
                 )
 
         # 5. Normal slot-filling logic for new/incomplete sessions.
@@ -263,6 +266,8 @@ class ChatService:
             reason_codes=detail.reason_codes,
             rationale=detail.rationale,
         )
+        if self._llm.active:
+            self._record_llm_response(db, session_id, detail.decision.value, reply)
         state.refund_runs += 1
         state.last_decision = detail.decision.value
         state.last_order_id = detail.order.order_id if detail.order else state.order_id
@@ -276,6 +281,7 @@ class ChatService:
             reply=reply,
             decision=detail.decision,
             decision_detail=detail,
+            llm_used=self._llm.active,
         )
 
     def _clarify_candidates(self, candidates: list[str]) -> str:
@@ -305,6 +311,7 @@ class ChatService:
         reply: str,
         decision: Any = None,
         decision_detail: Any = None,
+        llm_used: bool = False,
     ) -> ChatResponse:
         """Record an assistant response and build the API response."""
         state.messages.append({"role": "assistant", "content": reply})
@@ -314,7 +321,35 @@ class ChatService:
             reply=reply,
             decision=decision,
             decision_detail=decision_detail,
+            llm_used=llm_used,
         )
+
+    def _record_llm_response(
+        self, db: Session, session_id: str, decision: str, reply: str
+    ) -> None:
+        """Persist an ``llm_response`` trace event for the refund session.
+
+        Surfaces in the admin dashboard alongside the deterministic tool calls so
+        operators can see exactly where the LLM phrasing layer (not the decision
+        engine) shaped the customer-facing reply. Best-effort: a failure here must
+        never break the chat reply.
+        """
+        try:
+            TraceRepository(db).add_event(
+                session_id=session_id,
+                event_type=EventType.LLM_RESPONSE.value,
+                node_name="decision",
+                tool_name=f"{self._llm.provider}:{self._llm.model}",
+                message=f"LLM phrased the {decision} reply",
+                payload={
+                    "provider": self._llm.provider,
+                    "model": self._llm.model,
+                    "decision": decision,
+                    "reply": reply,
+                },
+            )
+        except Exception as exc:  # pragma: no cover - observability must not throw
+            _logger.warning("llm_response_event_failed", session_id=session_id, error=str(exc))
 
 
 def _normalize_explicit_order_id(order_id: str | None) -> str | None:

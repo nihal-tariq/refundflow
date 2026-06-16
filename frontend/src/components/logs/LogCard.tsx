@@ -7,6 +7,7 @@ import {
   CircleDot,
   PlayCircle,
   ShieldAlert,
+  Sparkles,
   Wrench,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
@@ -34,9 +35,15 @@ const META: Record<AgentEventType, { Icon: typeof CircleDot; tone: string }> = {
   validation_completed: { Icon: CheckCircle2, tone: "text-[hsl(var(--success))]" },
   retry_attempt: { Icon: AlertTriangle, tone: "text-[hsl(var(--warning))]" },
   escalation_triggered: { Icon: ShieldAlert, tone: "text-[hsl(var(--warning))]" },
+  llm_response: { Icon: Sparkles, tone: "text-primary" },
   execution_completed: { Icon: CheckCircle2, tone: "text-[hsl(var(--success))]" },
   execution_failed: { Icon: AlertTriangle, tone: "text-[hsl(var(--danger))]" },
 };
+
+/** Human-readable label per event type ("LLM" reads better than humanize's "Llm"). */
+function eventLabel(type: AgentEventType): string {
+  return type === "llm_response" ? "LLM Response" : humanize(type);
+}
 
 /**
  * An expandable log card for one agent event.
@@ -62,7 +69,7 @@ export function LogCard({ entry }: { entry: LogEntry }) {
         <Icon className={cn("mt-0.5 h-4 w-4 shrink-0", tone)} />
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
-            <span className="text-xs font-medium">{humanize(entry.eventType)}</span>
+            <span className="text-xs font-medium">{eventLabel(entry.eventType)}</span>
             {entry.toolName && (
               <Badge variant="outline" className="font-mono text-[10px]">
                 {entry.toolName}
